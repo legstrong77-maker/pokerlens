@@ -74,7 +74,15 @@ function registerSW() {
     return;
   }
   if (location.protocol !== 'https:') return;
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // a new version takes control -> reload once so the fresh files are used right away
+  let reloaded = false;
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloaded) return;
+    reloaded = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('sw.js').then((reg) => reg.update()).catch(() => {});
 }
 
 buildChrome();
