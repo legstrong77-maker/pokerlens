@@ -1,7 +1,8 @@
 // Camera scanner: live on-device detection, photo / video analysis, and Claude AI reading.
-import { state, emit } from './state.js';
+import { state, emit, resetTrack, positionsFor } from './state.js';
 import { $, esc, ICON, toast, haptic, miniCardHTML, cardText } from './ui.js';
-import { CardDetector, assignCards, Tracker, MODELS } from './detector.js';
+import { assignCards, Tracker, MODELS } from './detector.js';
+import { getDetector } from './live-vision.js';
 import { aiAvailable, readTable } from './vision-ai.js';
 
 let el = null, stream = null, video = null, still = null, overlay = null;
@@ -12,6 +13,7 @@ let lastDets = [];
 let onDone = null;
 let aiCtl = null;
 let mode = 'live'; // live | still
+let aiExtra = null; // pot / toCall / players / heroPosition read by the AI from the last photo
 
 const hasCamera = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext;
 
@@ -123,7 +125,8 @@ async function loadDetector() {
     // check the model file exists before pulling the runtime
     const head = await fetch(MODELS[pref].url, { method: 'HEAD' }).catch(() => null);
     if (!head || !head.ok) { detectorState = 'missing'; progress(null); status(stream ? '對準牌面後按快門（可用 AI 辨識）' : '拍照或上傳辨識'); note('尚未安裝裝置端辨識模型：請用「AI 精準辨識」或手動選牌'); return; }
-    detector = await new CardDetector(pref).init({ onProgress: (p) => progress(p * 0.9), useGpu: !!state.settings.gpu });
+    detector = await getDetector((p) => progress(p * 0.9));
+    if (!detector) { detectorState = 'missing'; progress(null); return; }
     detectorState = 'ready';
     progress(null);
     status(stream ? '即時辨識中…公牌放上方框、手牌放下方框' : '拍照或上傳辨識');
@@ -244,6 +247,7 @@ async function onClick(e) {
 }
 
 async function shoot() {
+  aiExtra = null;
   if (!stream || video.readyState < 2) { $('#sc-cap', el)?.click() || $('#sc-file', el).click(); return; }
   // freeze current frame into the still image
   const c = document.createElement('canvas');
@@ -279,6 +283,7 @@ async function detectStill() {
 }
 
 async function onFile(e) {
+  aiExtra = null;
   const f = e.target.files && e.target.files[0];
   e.target.value = '';
   if (!f) return;
@@ -364,7 +369,9 @@ async function runAI(file) {
     if (r.players != null) extra.push(`${r.players} 人在局`);
     status(`AI 辨識完成（信心：${{ high: '高', medium: '中', low: '低' }[r.confidence]}）`);
     note([r.notes, extra.join(' · ')].filter(Boolean).join(' ｜ ') || '請確認結果後按「套用」');
-    state._aiExtra = { pot: r.pot, toCall: r.toCall };
+    aiExtra = { pot: r.pot, toCall: r.toCall, players: r.players, heroPosition: r.heroPosition };
+    if (r.heroPosition) extra.push(`你在 ${r.heroPosition}`);
+    note([r.notes, extra.join(' · ')].filter(Boolean).join(' ｜ ') || '請確認結果後按「套用」');
   } catch (err) {
     status('AI 辨識失敗');
     note(err.message || String(err));
@@ -385,8 +392,24 @@ function apply() {
   const seen = new Set();
   h.hero = h.hero.map((c) => (c >= 0 && !seen.has(c) ? (seen.add(c), c) : -1));
   h.board = h.board.map((c) => (c >= 0 && !seen.has(c) ? (seen.add(c), c) : -1));
+  // AI photo read: hero seat, pot, amount to call, players left
+  const extraMsg = [];
+  if (aiExtra) {
+    const list = positionsFor(state.settings.tableSize);
+    if (aiExtra.heroPosition && list.includes(aiExtra.heroPosition) && aiExtra.heroPosition !== h.heroPos) {
+      h.heroPos = aiExtra.heroPosition; resetTrack(); extraMsg.push(`位置 ${aiExtra.heroPosition}`);
+    }
+    const n = h.board.filter((c) => c >= 0).length;
+    const street = n >= 5 ? 'river' : n === 4 ? 'turn' : n >= 3 ? 'flop' : 'preflop';
+    if (street !== 'preflop' && (aiExtra.pot != null || aiExtra.toCall != null)) {
+      h.override = { street, pot: aiExtra.pot, toCall: aiExtra.toCall, villains: aiExtra.players ? Math.max(1, aiExtra.players - 1) : null };
+      if (aiExtra.pot != null) extraMsg.push(`底池 ${aiExtra.pot} BB`);
+      if (aiExtra.toCall) extraMsg.push(`需跟注 ${aiExtra.toCall} BB`);
+    }
+    aiExtra = null;
+  }
   emit('hand');
   close();
-  toast(`已套用：手牌 ${hero.map(cardText).join(' ') || '—'}${board.length >= 3 ? ` ｜ 公牌 ${board.map(cardText).join(' ')}` : ''}`);
+  toast(`已套用：手牌 ${hero.map(cardText).join(' ') || '—'}${board.length >= 3 ? ` ｜ 公牌 ${board.map(cardText).join(' ')}` : ''}${extraMsg.length ? ' ｜ ' + extraMsg.join('、') : ''}`, 3200);
   onDone && onDone();
 }

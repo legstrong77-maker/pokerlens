@@ -16,8 +16,8 @@ function applySettings() {
 }
 
 function show(tab) {
-  if (tab === 'scan') {
-    import('./app/scanner.js').then((m) => m.openScanner(onCardsChanged));
+  if (tab === 'live') {
+    import('./app/analyst.js').then((m) => m.openAnalyst());
     return;
   }
   state.tab = tab;
@@ -37,7 +37,7 @@ function buildChrome() {
   $('#tabbar-inner').innerHTML = `
     <button class="tab on" data-tab="table">${ICON.table}<span>牌桌</span></button>
     <button class="tab" data-tab="ranges">${ICON.grid}<span>範圍</span></button>
-    <button class="tab fab" data-tab="scan" aria-label="掃描牌面"><span class="disc">${ICON.camera}</span><span>掃描</span></button>
+    <button class="tab fab" data-tab="live" aria-label="AI 即時分析"><span class="disc">${ICON.spark}</span><span>即時分析</span></button>
     <button class="tab" data-tab="tools">${ICON.tools}<span>工具</span></button>
     <button class="tab" data-tab="settings">${ICON.gear}<span>設定</span></button>`;
   document.addEventListener('click', (e) => {
@@ -68,7 +68,12 @@ function intro() {
 function registerSW() {
   const inArtifact = /claude\.ai|claudeusercontent|anthropic/.test(location.hostname) || window.self !== window.top;
   if (!('serviceWorker' in navigator) || inArtifact) return;
-  if (!(location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) return;
+  const dev = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if (dev) { // never serve stale files while developing
+    navigator.serviceWorker.getRegistrations().then((rs) => rs.forEach((r) => r.unregister())).catch(() => {});
+    return;
+  }
+  if (location.protocol !== 'https:') return;
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 

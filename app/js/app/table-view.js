@@ -1,8 +1,9 @@
 // Table / analysis screen.
 import {
   state, emit, newHand, deriveSpot, boardCards, streetOf, STREET_ZH, autoFlopSetup, defaultLogFor,
-  positionsBefore, positionsAfter, defaultOpener, default3Bettor, LOG_LABEL, heroIsIP, usedCards,
+  positionsBefore, positionsAfter, defaultOpener, default3Bettor, LOG_LABEL, heroIsIP, usedCards, resetTrack,
 } from './state.js';
+import * as TK from './tracker.js';
 import { positionsFor, POS_LABEL, POS_SHORT, VILLAIN_TYPES } from '../core/charts.js';
 import {
   $, esc, cardHTML, miniCardHTML, fmtBB, pct, ICON, toast, haptic, openSheet, closeSheet, ACTION_EN, ACTION_ZH,
@@ -40,8 +41,8 @@ export function render() {
     if (c >= 0) return `<button class="slot-btn" data-act="slot" data-slot="${id}" aria-label="更換 ${cardText(c)}">${cardHTML(c, on)}</button>`;
     return `<button class="slot ${on}" data-act="slot" data-slot="${id}" aria-label="選擇${label}"><span><span class="plus">+</span>${label}</span></button>`;
   };
-  const pot = street === 'preflop' ? null : d.pot;
-  const spr = street === 'preflop' ? null : d.effStack / Math.max(0.5, d.pot);
+  const pot = street === 'preflop' ? (d.tracker ? d.track.pot : null) : (d.pot ?? d.track?.pot ?? null);
+  const spr = street === 'preflop' || d.effStack == null ? null : d.effStack / Math.max(0.5, d.pot || 1);
 
   root.innerHTML = `
     <button class="situation" data-act="setup" aria-label="牌局設定">
@@ -55,7 +56,7 @@ export function render() {
     <div class="felt" aria-label="牌桌">
       <div class="felt-meta">
         <span>${STREET_ZH[street]}</span>
-        ${pot != null ? `<span class="pot num">${fmtBB(pot, false)}<small>BB 底池</small></span><span>SPR ${spr.toFixed(1)}</span>` : `<span class="pot">PRE<small>FLOP</small></span><span>${s.ante ? `前注 ${s.ante}` : '無前注'}</span>`}
+        ${pot != null ? `<span class="pot num">${fmtBB(pot, false)}<small>BB 底池</small></span><span>${spr != null ? `SPR ${spr.toFixed(1)}` : (s.ante ? `前注 ${s.ante}` : '盲注 0.5/1')}</span>` : `<span class="pot">PRE<small>FLOP</small></span><span>${s.ante ? `前注 ${s.ante}` : '無前注'}</span>`}
       </div>
       <div class="board">
         ${slot('b', 0, '翻牌')}${slot('b', 1, '翻牌')}${slot('b', 2, '翻牌')}${slot('b', 3, '轉牌')}${slot('b', 4, '河牌')}
@@ -72,7 +73,11 @@ export function render() {
       <button class="btn" data-act="newhand">${ICON.reset}<span>新的一手</span></button>
     </div>
 
-    ${street === 'preflop' ? preflopPanel(d) : postflopPanel(d)}
+    <div class="mode-bar"><span>動作輸入</span><div class="seg" style="width:auto;flex:1">
+      <button class="${s.trackMode ? 'on' : ''}" data-act="mode" data-v="track">逐人紀錄</button>
+      <button class="${!s.trackMode ? 'on' : ''}" data-act="mode" data-v="quick">快速</button></div></div>
+    ${s.trackMode ? trackerPanel(d) : street === 'preflop' ? preflopPanel(d) : postflopPanel(d)}
+    ${d.overridden ? `<p class="hint" style="margin:8px 2px 0">已套用照片讀到的底池／下注（底池 ${fmtBB(d.pot)}${d.cur?.bet ? `，需跟注 ${fmtBB(d.cur.bet)}` : ''}）<button class="chip" data-act="clear-override" style="min-height:26px;margin-left:6px">清除</button></p>` : ''}
 
     <div id="decision">${decisionHTML(state.result, d)}</div>
   `;
@@ -175,6 +180,59 @@ function postflopPanel(d) {
     </div>`;
 }
 
+// ---------------------------------------------------------------- tracker panel
+const TK_ZH = { fold: '棄', check: '過', call: '跟', bet: '下', raise: '加', allin: '全下' };
+export function trackerPanel(d) {
+  const h = state.hand;
+  const tr = h.track;
+  const t = TK.state(tr);
+  const opt = TK.options(tr);
+  const lastBy = new Map();
+  for (const a of t.streetActs[t.street]) lastBy.set(a.pos, a);
+  const seats = t.order.map((pos) => {
+    const st = t.seats.find((x) => x.pos === pos);
+    const la = lastBy.get(pos);
+    const cls = [!st.inHand ? 'out' : '', pos === t.toAct ? 'toact' : '', pos === h.heroPos ? 'hero' : ''].join(' ');
+    const what = !st.inHand ? '棄牌' : st.allIn ? '全下'
+      : la ? `${TK_ZH[la.kind] || ''}${la.kind !== 'fold' && la.kind !== 'check' ? ' ' + fmtBB(la.to, false) : ''}`
+      : (st.street > 0 ? `盲 ${fmtBB(st.street, false)}` : '—');
+    return `<div class="tk-seat ${cls}"><b>${esc(POS_SHORT[pos])}${pos === h.heroPos ? '·你' : ''}</b><span>${esc(what)}</span></div>`;
+  }).join('');
+  let actions = '';
+  if (t.done) actions = '<p class="hint" style="margin:10px 0 0">這手牌已結束。</p>';
+  else if (!opt) {
+    actions = t.street === 3
+      ? '<p class="hint" style="margin:10px 0 0">河牌下注結束，準備攤牌。</p>'
+      : `<button class="btn primary block" style="margin-top:10px" data-act="tk-next">${TK.STREET_ZH[t.street]}結束 → 發下一條街</button>`;
+  } else {
+    const rec = opt.isHero && state.result && !state.result.error ? state.result.action : null;
+    const recIs = (k, to) => !!rec && (rec.key === k || (k === 'raise' && rec.key === 'bet')) && (to == null || Math.abs((rec.sizeBB || 0) - to) < 0.6);
+    const btn = (label, attrs, on = false, cls = '') => `<button class="chip ${on ? 'on' : ''} ${cls}" ${attrs}>${label}</button>`;
+    actions = `<div class="tk-who">${opt.isHero ? '<b>輪到你</b>：看下方建議後，點你實際的動作' : `輪到 <b>${esc(POS_SHORT[opt.pos])}</b>${opt.owe > 0 ? `（需跟注 ${fmtBB(opt.owe)}）` : ''}`}</div>
+      <div class="chips" style="margin-top:8px">
+        ${btn('棄牌', 'data-act="tk" data-k="fold"', recIs('fold'), 'k-fold')}
+        ${opt.canCheck ? btn('過牌', 'data-act="tk" data-k="check"', recIs('check')) : btn(`跟注 ${fmtBB(opt.owe, false)}`, 'data-act="tk" data-k="call"', recIs('call'))}
+        ${opt.sizes.map((x) => btn(`${opt.betWord} ${fmtBB(x, false)}`, `data-act="tk" data-k="raise" data-to="${x}"`, recIs('raise', x))).join('')}
+        ${btn(`全下 ${fmtBB(opt.allIn, false)}`, 'data-act="tk" data-k="allin"', !!rec && rec.key === 'allin')}
+      </div>
+      <div class="row" style="margin-top:8px;gap:6px">
+        <input class="kbd-input" id="tk-amt" type="number" inputmode="decimal" step="0.5" min="0" placeholder="自訂金額 BB" style="min-height:36px;flex:1;padding:6px 10px" aria-label="自訂金額">
+        <button class="chip" data-act="tk-custom">${opt.betWord}</button>
+      </div>`;
+  }
+  const canFoldTo = opt && !opt.isHero && t.street === 0 && !t.streetActs[0].some((a) => a.pos === h.heroPos);
+  return `<div class="panel tracker" aria-label="逐人動作紀錄">
+    <div class="row" style="justify-content:space-between"><b style="font-size:14px">${TK.STREET_ZH[t.street]} · 逐人紀錄</b><span class="hint">底池 <b class="num" style="color:var(--ink)">${fmtBB(t.pot)}</b></span></div>
+    <div class="tk-seats">${seats}</div>
+    ${actions}
+    <div class="row" style="margin-top:10px;gap:6px;flex-wrap:wrap">
+      ${canFoldTo ? '<button class="chip" data-act="tk-foldto">前面全部棄牌 → 到我</button>' : ''}
+      <button class="chip" data-act="tk-undo" ${tr.actions.length ? '' : 'disabled style="opacity:.4"'}>↶ 撤銷</button>
+      <button class="chip" data-act="tk-reset">重設動作</button>
+    </div>
+  </div>`;
+}
+
 // ---------------------------------------------------------------- decision
 const KEYCLASS = { fold: 'k-fold', check: 'k-check', call: 'k-call', bet: 'k-bet', raise: 'k-raise', allin: 'k-allin' };
 const CONF_ZH = { clear: '明確', lean: '傾向', close: '接近・可混合' };
@@ -186,6 +244,14 @@ function decisionHTML(r, d) {
       <div class="cta-row" style="padding:0 16px 16px"><button class="btn primary" data-act="scan">${ICON.camera}掃描</button><button class="btn" data-act="slot" data-slot="h0">手動選牌</button></div></div>`;
   }
   if (d.allIn) return `<div class="decision"><div class="empty-state"><b>翻前全下</b>到「工具 → 勝率計算」查看對抗對手手牌的勝率。</div></div>`;
+  if (d.tracker && d.track?.done) return `<div class="decision"><div class="empty-state"><b>${esc(POS_SHORT[d.track.winner] || d.track.winner)}${d.track.winner === h.heroPos ? '（你）' : ''} 贏得底池 ${fmtBB(d.track.pot)}</b>其他人都棄牌了。</div><div class="block"><button class="btn block" data-act="newhand">${ICON.reset}下一手</button></div></div>`;
+  if (d.tracker && d.needBoard) return `<div class="decision"><div class="empty-state"><b>請發${['', '翻牌', '轉牌', '河牌'][d.needBoard]}</b>這條街的下注已結束，輸入公牌後立即分析。</div><div class="block"><button class="btn primary block" data-act="slot" data-slot="${['', 'b0', 'b3', 'b4'][d.needBoard]}">${ICON.camera}輸入${['', '翻牌', '轉牌', '河牌'][d.needBoard]}</button></div></div>`;
+  if (d.tracker && d.track && !d.track.heroToAct && d.track.toAct) {
+    return `<div class="decision"><div class="empty-state"><b>等待 ${esc(POS_SHORT[d.track.toAct])} 行動</b>在上方「逐人紀錄」點選他的動作；輪到你時會立即給出建議與原因。</div></div>`;
+  }
+  if (d.tracker && d.track && !d.track.toAct && !d.track.done && d.street !== 'river') {
+    return `<div class="decision"><div class="empty-state"><b>這條街結束</b>輸入下一張公牌繼續。</div><div class="block"><button class="btn primary block" data-act="tk-next">發下一條街 →</button></div></div>`;
+  }
   if (!r) return `<div class="decision"><div class="head"><div class="eyebrow">AI 分析中</div><div class="busy"></div><div class="act-line"><span class="act-word" style="color:var(--ink-3)">…</span></div></div></div>`;
   if (r.error) return `<div class="decision"><div class="empty-state"><b>無法分析</b>${esc(r.error)}</div></div>`;
   const key = r.action.key;
@@ -314,7 +380,7 @@ export function scheduleAnalysis(immediate = false) {
 }
 async function runAnalysis() {
   const d = deriveSpot();
-  if (!d.ready || !d.spot) { state.result = null; renderDecisionOnly(d); return; }
+  if (!d.ready || !d.spot || (d.tracker && d.track && (!d.track.heroToAct || d.track.done))) { state.result = null; renderDecisionOnly(d); return; }
   state.busy = true;
   renderDecisionOnly(d);
   try {
@@ -328,7 +394,8 @@ async function runAnalysis() {
   } finally {
     state.busy = false;
   }
-  renderDecisionOnly(deriveSpot());
+  // tracker mode: re-render so the recommended action is highlighted in the action row
+  if (state.settings.trackMode) render(); else renderDecisionOnly(deriveSpot());
 }
 function renderDecisionOnly(d) {
   const el = root && root.querySelector('#decision');
@@ -367,6 +434,25 @@ function onClick(e) {
     case 'herobet': h.cur.heroBet = Math.max(0.5, round1((h.cur.heroBet || 0) + +el.dataset.d)); if (h.cur.bet < h.cur.heroBet * 2) h.cur.bet = round1(h.cur.heroBet * 2.5); break;
     case 'raisemult': h.cur.bet = round1((h.cur.heroBet || 1) * +v); break;
     case 'flopsetup': return openFlopSetup();
+    case 'mode': s.trackMode = v === 'track'; if (s.trackMode && !h.track) resetTrack(); break;
+    case 'clear-override': h.override = null; break;
+    case 'tk': TK.act(h.track, el.dataset.k, el.dataset.to ? +el.dataset.to : undefined); h.override = null; break;
+    case 'tk-custom': {
+      const amt = parseFloat(root.querySelector('#tk-amt')?.value);
+      if (!(amt > 0)) { toast('請輸入金額（BB）'); return; }
+      TK.act(h.track, 'raise', amt); h.override = null; break;
+    }
+    case 'tk-undo': TK.undo(h.track); break;
+    case 'tk-reset': resetTrack(); break;
+    case 'tk-foldto': TK.foldToHero(h.track); break;
+    case 'tk-next': {
+      TK.nextStreet(h.track);
+      const t = TK.state(h.track);
+      emit('hand'); render();
+      if (boardCards(h).length < [0, 3, 4, 5][t.street]) return openPicker(['b0', 'b0', 'b3', 'b4'][t.street], onCardsChanged);
+      scheduleAnalysis(true);
+      return;
+    }
     case 'log': return openLogEditor(+el.dataset.street);
     default: return;
   }
@@ -390,21 +476,31 @@ export function onCardsChanged() {
   }
   const street = streetOf(n);
   if (h.cur.street !== street) h.cur = { street, facing: 'none', bet: 0, heroBet: 0 };
+  if (h.override && h.override.street !== street) h.override = null;
+  if (state.settings.trackMode && h.track) {
+    const want = { preflop: 0, flop: 1, turn: 2, river: 3 }[street];
+    for (let guard = 0; guard < 4; guard++) {
+      const ts = TK.state(h.track);
+      if (ts.street >= want || ts.done) break;
+      TK.nextStreet(h.track);
+    }
+  }
   state.result = null;
   emit('hand');
   render();
   scheduleAnalysis(true);
 }
 function onSettingsChanged() {
-  const h = state.hand;
+  const h = state.hand, s = state.settings;
   if (h.flop) h.flop = { ...h.flop, heroIP: undefined };
+  if (!h.track || h.track.heroPos !== h.heroPos || h.track.size !== s.tableSize || h.track.stack !== s.stack || h.track.ante !== s.ante) resetTrack();
   state.result = null;
   emit('settings');
   render();
   scheduleAnalysis(true);
 }
 
-function newHandAction() {
+export function newHandAction() {
   const h = state.hand;
   if (h.hero[0] >= 0 && h.hero[1] >= 0) {
     state.history.unshift({

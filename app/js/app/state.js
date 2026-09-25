@@ -1,6 +1,7 @@
 // App state, persistence and the hand-flow model (UI state -> engine spot).
 import { store } from './ui.js';
 import { positionsFor, postflopOrder, playersBehind } from '../core/charts.js';
+import { newTrack, trackerSpot, state as trackState } from './tracker.js';
 
 export const SETTINGS_DEFAULT = {
   tableSize: 6,
@@ -16,6 +17,8 @@ export const SETTINGS_DEFAULT = {
   aiModel: 'claude-opus-5',
   detectModel: 'accurate', // fast | accurate | off (accurate: 98.8% precision on real photos)
   gpu: false,
+  trackMode: true,      // per-player action tracker (精準模式)
+  aiAuto: true,         // live analyst: auto-analyse when the table changes
   seenIntro: false,
 };
 
@@ -33,7 +36,14 @@ export function newHand(settings, prev) {
     log: {},         // per completed street: { kind: 'xx'|'hb'|'vb'|'hbr'|'vbr', amount }
     cur: { street: 'preflop', facing: 'none', bet: 0, heroBet: 0 },
     recs: {},        // last recommendation per street {key,sizeBB,facing,bet}
+    track: newTrack({ size: settings.tableSize, heroPos: prev?.heroPos || 'BTN', stack: settings.stack, ante: settings.ante }),
+    override: null,  // { street, pot, toCall, villains } read from a photo by the AI
   };
+}
+
+/** Rebuild the tracker when seat/table/stack settings change. */
+export function resetTrack(h = state.hand, s = state.settings) {
+  h.track = newTrack({ size: s.tableSize, heroPos: h.heroPos, stack: s.stack, ante: s.ante });
 }
 
 const KEY = 'pokerlens.v1';
@@ -41,6 +51,9 @@ export const state = (() => {
   const saved = store.get(KEY, null);
   const settings = { ...SETTINGS_DEFAULT, ...(saved?.settings || {}) };
   const hand = saved?.hand && saved.hand.hero ? { ...newHand(settings), ...saved.hand } : newHand(settings);
+  if (!hand.track || hand.track.heroPos !== hand.heroPos || hand.track.size !== settings.tableSize) {
+    hand.track = newTrack({ size: settings.tableSize, heroPos: hand.heroPos, stack: settings.stack, ante: settings.ante });
+  }
   return { settings, hand, history: saved?.history || [], tab: 'table', activeSlot: null, result: null, busy: false };
 })();
 
@@ -183,6 +196,7 @@ export function deriveSpot(st = state) {
     villainType: s.villainType, openSize: s.openSize,
   };
   const d = { street, ready: hero.length === 2, board };
+  if (s.trackMode && h.track) return deriveFromTracker(st, base, d);
   if (street === 'preflop') {
     const pre = { ...h.pre };
     if (pre.scenario === 'vsOpen') pre.openerPos = pre.openerPos || defaultOpener(h, s.tableSize);
@@ -214,8 +228,41 @@ export function deriveSpot(st = state) {
   };
   d.spot = base;
   d.pot = pot; d.effStack = effStack; d.heroIP = heroIP; d.cur = cur;
+  applyOverride(h, d);
   return d;
 }
+
+/** Photo-read values (pot / amount to call / players) override the current street. */
+function applyOverride(h, d) {
+  const o = h.override;
+  if (!o || o.street !== d.street || !d.spot?.postflop) return;
+  const P = d.spot.postflop;
+  if (o.pot != null) P.pot = Math.max(0.5, o.pot - (o.toCall || 0));
+  if (o.toCall != null) { P.facing = o.toCall > 0 ? 'bet' : 'none'; P.bet = o.toCall; P.heroBet = 0; P.callersInFront = 0; }
+  if (o.villains) P.villains = o.villains;
+  d.pot = P.pot; d.overridden = true;
+}
+
+function deriveFromTracker(st, base, d) {
+  const h = st.hand;
+  const tk = trackerSpot(h.track);
+  d.track = tk.meta;
+  d.tracker = true;
+  const boardStreet = { preflop: 0, flop: 1, turn: 2, river: 3 }[d.street];
+  if (tk.meta.street > boardStreet) { d.needBoard = tk.meta.street; d.spot = null; return d; }
+  if (tk.meta.street < boardStreet) { d.trackBehind = true; d.spot = null; return d; }
+  if (tk.preflop) base.preflop = tk.preflop;
+  else {
+    base.postflop = tk.postflop;
+    d.pot = tk.postflop.pot; d.effStack = tk.postflop.effStack; d.heroIP = tk.postflop.heroIP;
+    d.cur = { facing: tk.postflop.facing, bet: tk.postflop.bet, heroBet: tk.postflop.heroBet };
+  }
+  d.spot = base;
+  applyOverride(h, d);
+  return d;
+}
+
+export { trackState };
 
 /** Default assumption for how a street ended, based on the last recommendation on it. */
 export function defaultLogFor(streetN, st = state) {
