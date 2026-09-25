@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PokerLens 牌眼</title>
+<meta name="description" content="德州撲克 AI 決策助手：掃描手牌與公牌，第一視角計算勝率、底池賠率與 EV，建議棄牌、過牌、跟注或下注尺寸。">
+<meta name="theme-color" content="#0c1512">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="牌眼">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&family=IBM+Plex+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span>PokerLens<small>牌眼</small></div>
+    <div class="spacer"></div>
+    <div id="topbar-actions" class="row" style="gap:8px"></div>
+  </header>
+  <main>
+    <section class="view" id="view-table" aria-label="牌桌分析"></section>
+    <section class="view" id="view-ranges" aria-label="翻前範圍" hidden></section>
+    <section class="view" id="view-tools" aria-label="工具" hidden></section>
+    <section class="view" id="view-settings" aria-label="設定" hidden></section>
+  </main>
+</div>
+<nav class="tabbar" aria-label="主選單"><div class="inner" id="tabbar-inner"></div></nav>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
